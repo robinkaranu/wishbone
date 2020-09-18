@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -12,12 +14,25 @@ import (
 	"go.bug.st/serial"
 )
 
+type SphincterStatus int
+
+const (
+	UNKNOWN  = 0 // no power?
+	LOCKED   = 1
+	UNLOCKED = 2
+	FAILURE  = 3
+)
+
 var (
 	list = flag.String("list", "list.txt", "RFID list")
 	port = flag.String("port", "/dev/ttyUSB0", "reader device")
 
-	OpenPin  rpio.Pin = rpio.Pin(22)
-	ClosePin rpio.Pin = rpio.Pin(27)
+	OpenPin    rpio.Pin = rpio.Pin(22) // 15
+	ClosePin   rpio.Pin = rpio.Pin(27) // 13
+	StatusPin0 rpio.Pin = rpio.Pin(4)  // 7
+	StatusPin1 rpio.Pin = rpio.Pin(17) // 11
+
+	sphincterStatus SphincterStatus
 
 	latestTimestamp time.Time
 )
@@ -67,6 +82,27 @@ func isValid(token string) bool {
 	return len(token) > 0
 }
 
+func querySphincterStatus() SphincterStatus {
+	var sphincterStatus SphincterStatus
+	if StatusPin0.Read() == rpio.Low &&
+		StatusPin1.Read() == rpio.Low {
+		sphincterStatus = UNKNOWN
+	}
+	if StatusPin0.Read() == rpio.High &&
+		StatusPin1.Read() == rpio.High {
+		sphincterStatus = FAILURE
+	}
+	if StatusPin0.Read() == rpio.High &&
+		StatusPin1.Read() == rpio.Low {
+		sphincterStatus = UNLOCKED
+	}
+	if StatusPin0.Read() == rpio.Low &&
+		StatusPin1.Read() == rpio.High {
+		sphincterStatus = LOCKED
+	}
+	return sphincterStatus
+}
+
 func main() {
 	flag.Parse()
 
@@ -78,6 +114,8 @@ func main() {
 	}
 	OpenPin.Output()
 	ClosePin.Output()
+	StatusPin0.Input()
+	StatusPin1.Input()
 
 	log.Println(" :::: Reading list.txt")
 	users, err := parseUserList()
@@ -95,6 +133,38 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	log.Println(" :::: Setting up webserver")
+	http.HandleFunc("/sphincter", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			log.Println("Ignoring non-GET request.")
+			return
+		}
+		//r.ParseForm()
+		action := r.URL.Query().Get("action")
+		//token := r.Form.Get("token")
+		switch {
+		case action == "status":
+			fmt.Fprint(w, "UNLOCKED")
+		case action == "unlock":
+			// TODO: check token
+			OpenPin.High()
+			time.Sleep(1 * time.Second)
+			OpenPin.Low()
+			fmt.Fprint(w, "UNLOCKED")
+		case action == "lock":
+			// TODO: check token
+			ClosePin.High()
+			time.Sleep(1 * time.Second)
+			ClosePin.Low()
+			fmt.Fprint(w, "LOCKED")
+		default:
+			fmt.Fprint(w, "action parameter must be one of status, lock or unlock")
+		}
+
+	})
+	http.ListenAndServe(":80", nil)
+
 	log.Println(" :: Initialized!")
 
 	for msg := range getRFIDToken(&port) {
