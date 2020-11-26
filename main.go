@@ -24,7 +24,7 @@ const (
 )
 
 var (
-	list = flag.String("list", "list.txt", "RFID list")
+	list = flag.String("list", "list.txt", "account list")
 	port = flag.String("port", "/dev/ttyUSB0", "reader device")
 
 	OpenPin    rpio.Pin = rpio.Pin(22) // 15
@@ -33,6 +33,8 @@ var (
 	StatusPin1 rpio.Pin = rpio.Pin(17) // 11
 
 	sphincterStatus SphincterStatus
+	CmdChan         = make(chan string)
+	UpdateChan      = make(chan bool)
 
 	latestTimestamp time.Time
 )
@@ -82,8 +84,7 @@ func isValid(token string) bool {
 	return len(token) > 0
 }
 
-func querySphincterStatus() SphincterStatus {
-	var sphincterStatus SphincterStatus
+func updateSphincterStatus() SphincterStatus {
 	if StatusPin0.Read() == rpio.Low &&
 		StatusPin1.Read() == rpio.Low {
 		sphincterStatus = UNKNOWN
@@ -101,6 +102,35 @@ func querySphincterStatus() SphincterStatus {
 		sphincterStatus = LOCKED
 	}
 	return sphincterStatus
+}
+
+func sphincterOpen() bool {
+	return false
+}
+func sphincterClose() bool {
+	return false
+}
+
+func setupSphincterCmdChannel() {
+	go func() {
+		for cmd := range CmdChan {
+			log.Println("cmd: %s", cmd)
+			switch {
+			case cmd == "open":
+				OpenPin.High()
+				// TODO: python version did 100ms
+				time.Sleep(1 * time.Second)
+				OpenPin.Low()
+			case cmd == "close":
+				ClosePin.High()
+				// TODO: python version did 100ms
+				time.Sleep(1 * time.Second)
+				ClosePin.Low()
+			default:
+				log.Println("unknown cmd received on CmdChan")
+			}
+		}
+	}()
 }
 
 func main() {
@@ -136,6 +166,7 @@ func main() {
 
 	log.Println(" :::: Setting up webserver")
 	http.HandleFunc("/sphincter", func(w http.ResponseWriter, r *http.Request) {
+		log.Println(r)
 		if r.Method != "GET" {
 			log.Println("Ignoring non-GET request.")
 			return
@@ -144,7 +175,7 @@ func main() {
 		action := r.URL.Query().Get("action")
 		//token := r.Form.Get("token")
 		switch {
-		case action == "status":
+		case action == "state":
 			fmt.Fprint(w, "UNLOCKED")
 		case action == "unlock":
 			// TODO: check token
@@ -154,16 +185,13 @@ func main() {
 			fmt.Fprint(w, "UNLOCKED")
 		case action == "lock":
 			// TODO: check token
-			ClosePin.High()
-			time.Sleep(1 * time.Second)
-			ClosePin.Low()
 			fmt.Fprint(w, "LOCKED")
 		default:
 			fmt.Fprint(w, "action parameter must be one of status, lock or unlock")
 		}
 
 	})
-	http.ListenAndServe(":80", nil)
+	http.ListenAndServe(":8001", nil)
 
 	log.Println(" :: Initialized!")
 
